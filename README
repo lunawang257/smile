@@ -1,0 +1,30 @@
+* Checkout submodule "optlib"
+
+git submodule init
+git submodule update
+
+* Setup python env
+
+python3 -m venv env
+source env/bin/activate
+
+* Install required packages
+
+pip3 install --upgrade pip
+pip3 install requests pandas scipy torch
+
+* Install optlib
+
+cd optlib
+python setup.py install
+
+* Setup
+
+* The following command generates results for multiple parameters. It runs for 6 minutes, and generated summary file in "spysum.csv" and detailed transaction in "spyout.csv". Both files are checked in.
+
+  ./Smile.py -i ../options-data/SPY.csv -o spyout2.csv -s spysum2.csv -m msi.json -P 25,35,1 -p 0 0.05,0.06,0.4,0.4 0.1,0.2,0.4,0.5 0.1 0.3 0.4 0.5 0.6 0.7
+
+* Mises Stationarity Index
+
+  msindex.net
+  https://github.com/ckrowland/msindex
