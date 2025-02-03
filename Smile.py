@@ -250,9 +250,11 @@ class Param:
     def __init__(self,
                  fixed_param=None,
                  put_otm_percent=30,
+                 call_otm_percent=10,
                  monthly_put_percent=[]) -> None:
         self.fixed_param = fixed_param
         self.put_otm_percent = put_otm_percent / 100
+        self.call_otm_percent = call_otm_percent / 100
         self.monthly_put_percent = []
 
         for i in range(4):
@@ -961,7 +963,20 @@ def main():
         put_otm_stop = put_otm_start
         put_otm_step = 1
     else:
-        print(f'"-otm" must be 1 or 3 comma separated numbers: {args.otm}')
+        print(f'"-put-otm" must be 1 or 3 comma separated numbers: {args.put_otm}')
+        sys.exit(1)
+
+    call_otm_info = args.call_otm.split(',')
+    if len(call_otm_info) == 3:
+        call_otm_start = int(call_otm_info[0])
+        call_otm_stop = int(call_otm_info[1])
+        call_otm_step = int(call_otm_info[2])
+    elif len(call_otm_info) == 1:
+        call_otm_start = int(call_otm_info[0])
+        call_otm_stop = call_otm_start
+        call_otm_step = 1
+    else:
+        print(f'"-C" must be 1 or 3 comma separated numbers: {args.call_otm}')
         sys.exit(1)
 
     all_monthly_put_percent = []
@@ -981,14 +996,17 @@ def main():
     for monthly_put_percent in all_monthly_put_percent:
         for put_otm in range(put_otm_start, put_otm_stop + put_otm_step,
                          put_otm_step):
-            param = Param(
-                fixed_param = fixed_param,
-                put_otm_percent = put_otm,
-                monthly_put_percent = monthly_put_percent)
-            params.append(param)
-            all_percent = set(monthly_put_percent)
-            if len(all_percent) == 1 and next(iter(all_percent)) == 0:
-                break
+            for call_otm in range(call_otm_start, call_otm_stop + call_otm_step,
+                              call_otm_step):
+                param = Param(
+                    fixed_param = fixed_param,
+                    put_otm_percent = put_otm,
+                    call_otm_percent = call_otm,
+                    monthly_put_percent = monthly_put_percent)
+                params.append(param)
+                all_percent = set(monthly_put_percent)
+                if len(all_percent) == 1 and next(iter(all_percent)) == 0:
+                    break
 
     df = pd.read_csv(args.input_path, encoding='utf-8',
                      skipinitialspace=True)
