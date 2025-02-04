@@ -645,7 +645,7 @@ def buy_new_put(param, date, group, stat) -> float:
         new_put_cost = 0
     return new_put_cost
 
-def roll_over_put_pos(param, date, group, stat) -> None:
+def roll_over_option_pos(param, date, group, stat) -> None:
     stock_price = group['UnderlyingPrice'].iloc[0]
 
     # must buy new put before sell old put, so that the value of the old
@@ -813,7 +813,7 @@ def smile_strategy(df, param):
         monthly = (day_idx == 0 or date == current_third_friday)
 
         if monthly:
-            roll_over_put_pos(param, date, group, stat)
+            roll_over_option_pos(param, date, group, stat)
 
         if last_year is None:
             last_year = date.year
@@ -877,7 +877,7 @@ def main():
 
     parser.add_argument(
         '-D', '--max-delta', default=0.5,
-        help="Maximum delta of options to buy")
+        help="Maximum delta of options to buy/sell, avoid buying/selling too expensive ones")
 
     parser.add_argument(
         '-d', '--debug', action='store_true',
