@@ -152,7 +152,10 @@ def add_monthly_csv_row(param=None, date='', action='buy', entType='stock',
     add_val(row, 'stkOpenPrice', stkOpenPrice)
     add_val(row, 'stkPrice', stkPrice)
 
-    assert contracts >= 0
+    if entType == 'put':
+        assert contracts >= 0
+    elif entType == 'call':
+        assert contracts <= 0
     add_val(row, 'contracts', round_float(contracts, digits=0))
     add_val(row, 'optOpenPrice', optOpenPrice)
     add_val(row, 'optPrice', optPrice)
@@ -468,7 +471,7 @@ def third_fri_after_2_mon(year, month):
 
 def get_sell_price(param, put_info):
     mid = (put_info['BidPrice'] + put_info['AskPrice']) / 2
-    return mid * (1 - param.fixed_param.opt_slippage_percent)
+    return max(mid * (1 - param.fixed_param.opt_slippage_percent), 0), mid
 
 def get_buy_price(param, opt_info) -> (float, float):
     mid = (opt_info['BidPrice'] + opt_info['AskPrice']) / 2
@@ -512,9 +515,9 @@ def close_old_option(param, date, group, stat, opt_type='p') -> float:
                   (group['ExpirationDate'] == opt_pos.exp_date)]
         assert(len(opt_info) == 1)
         if is_put:
-            opt_close_price = get_sell_price(param, opt_info.iloc[0])
+            opt_close_price, _ = get_sell_price(param, opt_info.iloc[0])
         else:
-            opt_close_price = get_buy_price(param, opt_info.iloc[0])
+            opt_close_price, _ = get_buy_price(param, opt_info.iloc[0])
         old_opt_value += \
             max((opt_close_price * CONTRACT_SCALE - \
                  param.fixed_param.opt_comm_per_contract) * \
@@ -554,18 +557,21 @@ def close_old_option(param, date, group, stat, opt_type='p') -> float:
 def sell_old_put(param, date, group, stat) -> float:
     return close_old_option(param, date, group, stat, opt_type='p')
 
+def buy_old_call(param, date, group, stat) -> float:
+    return close_old_option(param, date, group, stat, opt_type='c')
+
 def delta_iv(param, date, stock_price, pos):
     days = (pos.exp_date - date).days
     time_to_expire_in_years = days / 365.25
-    risk_free_rate = 0.0005 # TODO: use real treasury yield
+    risk_free_rate = 0.05 # TODO: use real treasury yield
     dividend_yield = 0.013 # TODO: use real dividend
 
     implied_vol = euro_implied_vol(
-        'p', fs=stock_price, x=pos.strike, t=time_to_expire_in_years,
+        pos.opt_type, fs=stock_price, x=pos.strike, t=time_to_expire_in_years,
         r=risk_free_rate, q=dividend_yield, cp=pos.org_price)
 
     value, delta, gamma, theta, vega, rho = \
-        merton('p', fs=stock_price, x=pos.strike, t=time_to_expire_in_years,
+        merton(pos.opt_type, fs=stock_price, x=pos.strike, t=time_to_expire_in_years,
                r=risk_free_rate, q=dividend_yield, v=implied_vol)
     assert_close(value, pos.org_price)
 
@@ -610,8 +616,12 @@ def open_new_option(param, date, group, stat, opt_type='p') -> float:
     new_opt_info = opt_info.iloc[0]
     new_opt_pos.strike = new_opt_info['StrikePrice']
 
-    new_opt_pos.open_price, new_opt_pos.org_price = \
-        get_buy_price(param, new_opt_info)
+    if is_put:
+        new_opt_pos.open_price, new_opt_pos.org_price = \
+            get_buy_price(param, new_opt_info)
+    else:
+        new_opt_pos.open_price, new_opt_pos.org_price = \
+            get_sell_price(param, new_opt_info)
 
     if new_opt_pos.open_price != 0:
         nlv, opt_nlv = stat.get_balance(group)
@@ -633,10 +643,10 @@ def open_new_option(param, date, group, stat, opt_type='p') -> float:
                     CONTRACT_SCALE)
             assert new_opt_pos.num_contracts >= 0
         else:
-            max_call_contracts = nlv / CONTRACT_SCALE
+            max_call_contracts = stat.total_shares() / CONTRACT_SCALE
             new_opt_pos.num_contracts = \
                 -1 * int(max_call_contracts * (param.call_percent / 100))
-            assert new_opt_pos.num_contracts <= 0 # sell calls, so must < 0
+            assert new_opt_pos.num_contracts <= 0 # sell calls, so must be negative
 
         new_opt_cost = \
             (new_opt_pos.open_price * CONTRACT_SCALE +
@@ -672,16 +682,23 @@ def open_new_option(param, date, group, stat, opt_type='p') -> float:
 def buy_new_put(param, date, group, stat) -> float:
     return open_new_option(param, date, group, stat, opt_type='p')
 
+def sell_new_call(param, date, group, stat) -> float:
+    return open_new_option(param, date, group, stat, opt_type='c')
+
 def roll_over_option_pos(param, date, group, stat) -> None:
     stock_price = group['UnderlyingPrice'].iloc[0]
 
     # must buy new put before sell old put, so that the value of the old
-    # put is considered when calculating NLV
+    # put is considered when calculating NLV when buying new put
     new_put_cost = buy_new_put(param, date, group, stat)
 
     old_put_value = sell_old_put(param, date, group, stat)
 
-    net_balance = old_put_value - new_put_cost
+    # process covered call
+    old_call_value = buy_old_call(param, date, group, stat)
+    new_call_cost = sell_new_call(param, date, group, stat)
+
+    net_balance = old_put_value - new_put_cost + old_call_value - new_call_cost
     if net_balance > 0: # put generated profit, buy more shares
         fill_price = stock_price + \
             (param.fixed_param.stock_slippage + \
