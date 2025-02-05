@@ -251,11 +251,13 @@ class Param:
                  fixed_param=None,
                  put_otm_percent=30,
                  call_otm_percent=10,
-                 monthly_put_percent=[]) -> None:
+                 monthly_put_percent=[],
+                 call_percent=0) -> None:
         self.fixed_param = fixed_param
         self.put_otm_percent = put_otm_percent / 100
         self.call_otm_percent = call_otm_percent / 100
         self.monthly_put_percent = []
+        self.call_percent = call_percent
 
         for i in range(4):
             if i >= len(monthly_put_percent):
@@ -557,93 +559,106 @@ def delta_iv(param, date, stock_price, pos):
 
     return delta, implied_vol
 
-def buy_new_put(param, date, group, stat) -> float:
+def open_new_option(param, date, group, stat, opt_type='p') -> float:
+    assert opt_type in ['p', 'c']
+    is_put = (opt_type == 'p')
     stock_price = group['UnderlyingPrice'].iloc[0]
     date_str = date.strftime("%Y-%m-%d")
 
-    new_put_pos = OptPosition('p')
-    new_put_pos.exp_date = third_fri_after_2_mon(date.year, date.month)
-    strike = stock_price * (1 - param.put_otm_percent)
-    new_put_pos.open_date = date
+    new_opt_pos = OptPosition(opt_type)
+    new_opt_pos.exp_date = third_fri_after_2_mon(date.year, date.month)
+    if is_put:
+        strike = stock_price * (1 - param.put_otm_percent)
+    else:
+        strike = stock_price * (1 + param.call_otm_percent)
+    new_opt_pos.open_date = date
 
-    put_info = \
-        group[(group['PutCall'] == 'p') &
-              (group['StrikePrice'] <= strike) &
-              (group['ExpirationDate'] == new_put_pos.exp_date)].\
-              sort_values(by='StrikePrice', ascending=False)
+    opt_info = \
+        group[(group['PutCall'] == opt_type) &
+              (group['StrikePrice'] <= strike if is_put else group['StrikePrice'] >= strike) &
+              (group['ExpirationDate'] == new_opt_pos.exp_date)].\
+              sort_values(by='StrikePrice', ascending=(not is_put))
 
-    if put_info.empty:
-        new_exp_date = new_put_pos.exp_date - pd.Timedelta(days=1)
-        put_info = \
-            group[(group['PutCall'] == 'p') &
-                  (group['StrikePrice'] <= strike) &
+    if opt_info.empty:
+        new_exp_date = new_opt_pos.exp_date - pd.Timedelta(days=1)
+        opt_info = \
+            group[(group['PutCall'] == opt_type) &
+                  (group['StrikePrice'] <= strike if is_put else group['StrikePrice'] >= strike) &
                   (group['ExpirationDate'] == new_exp_date)].\
-                  sort_values(by='StrikePrice', ascending=False)
-        if not put_info.empty:
+                  sort_values(by='StrikePrice', ascending=(not is_put))
+        if not opt_info.empty:
             print(f'=== {date_str}: no opt expire on ' + \
-                  f'{new_put_pos.exp_date} found expire on {new_exp_date}')
-            new_put_pos.exp_date = new_exp_date
+                  f'{new_opt_pos.exp_date} found expire on {new_exp_date}')
+            new_opt_pos.exp_date = new_exp_date
 
-    if put_info.empty: # not found, skip
+    if opt_info.empty: # not found, skip
         stat.num_strike_too_low += 1
         return 0
 
-    new_put_info = put_info.iloc[0]
-    new_put_pos.strike = new_put_info['StrikePrice']
+    new_opt_info = opt_info.iloc[0]
+    new_opt_pos.strike = new_opt_info['StrikePrice']
 
-    new_put_pos.open_price, new_put_pos.org_price = \
-        get_buy_price(param, new_put_info)
+    new_opt_pos.open_price, new_opt_pos.org_price = \
+        get_buy_price(param, new_opt_info)
 
-    if new_put_pos.open_price != 0:
-        put_percent = param.monthly_put_percent[get_quartile(date.year)]
-
+    if new_opt_pos.open_price != 0:
         nlv, opt_nlv = stat.get_balance(group)
 
-        new_put_pos.per_contract_delta, new_put_pos.implied_vol = \
-            delta_iv(param, date, stock_price, new_put_pos)
+        new_opt_pos.per_contract_delta, new_opt_pos.implied_vol = \
+            delta_iv(param, date, stock_price, new_opt_pos)
 
-        # delta of put is negative, convert it to positive
-        max_contracts = stat.total_shares() * param.fixed_param.max_delta \
-            / (-1 * new_put_pos.per_contract_delta * CONTRACT_SCALE)
+        if is_put:
+            # delta of put is negative, convert it to positive
+            max_contracts = stat.total_shares() * param.fixed_param.max_delta \
+                / (abs(new_opt_pos.per_contract_delta) * CONTRACT_SCALE)
 
-        new_put_pos.num_contracts = \
-            min(max_contracts,
-                nlv * put_percent / \
-                (new_put_pos.open_price + \
-                 param.fixed_param.opt_comm_per_contract) / \
-                CONTRACT_SCALE)
+            put_percent = param.monthly_put_percent[get_quartile(date.year)]
+            new_opt_pos.num_contracts = \
+                min(max_contracts,
+                    nlv * put_percent / \
+                    (new_opt_pos.open_price + \
+                     param.fixed_param.opt_comm_per_contract) / \
+                    CONTRACT_SCALE)
+            assert new_opt_pos.num_contracts >= 0
+        else:
+            max_call_contracts = nlv / CONTRACT_SCALE
+            new_opt_pos.num_contracts = \
+                -1 * int(max_call_contracts * (param.call_percent / 100))
+            assert new_opt_pos.num_contracts <= 0 # sell calls, so must < 0
 
-        assert new_put_pos.num_contracts >= 0
-
-        new_put_cost = \
-            (new_put_pos.open_price * CONTRACT_SCALE +
+        new_opt_cost = \
+            (new_opt_pos.open_price * CONTRACT_SCALE +
              param.fixed_param.opt_comm_per_contract) * \
-             new_put_pos.num_contracts
+             new_opt_pos.num_contracts
 
         stat.total_commission += \
-            param.fixed_param.opt_comm_per_contract * new_put_pos.num_contracts
+            param.fixed_param.opt_comm_per_contract * new_opt_pos.num_contracts
 
+        act = 'buy' if is_put else 'sell'
         if Debug:
             stock_price = group['UnderlyingPrice'].iloc[0]
             nlv, opt_nlv = stat.get_balance(group)
-            print(f'{date_str}: buy {new_put_pos.num_contracts:.0f} ' + \
-                  f'at ${new_put_pos.open_price:.2f} {new_put_pos} ' + \
+            print(f'{date_str}: {act} {abs(new_opt_pos.num_contracts):.0f} ' + \
+                  f'at ${new_opt_pos.open_price:.2f} {new_opt_pos} ' + \
                   f'stock={stock_price} NLV={nlv:.0f} ' + \
                   f'put_gain={stat.total_put_capital_gain}')
-        stat.opt_list.append(new_put_pos)
+        stat.opt_list.append(new_opt_pos)
         add_monthly_csv_row(
-            param=param, date=date_str, action='buy',
-            entType='put',
+            param=param, date=date_str, action=act,
+            entType='put' if is_put else 'call',
             stkPrice=stock_price,
-            contracts=new_put_pos.num_contracts,
-            optOpenPrice=new_put_pos.open_price,
-            optPrice=new_put_pos.open_price,
-            strike=new_put_pos.strike,
-            expDate=new_put_pos.exp_date.strftime("%Y-%m-%d"),
+            contracts=new_opt_pos.num_contracts,
+            optOpenPrice=new_opt_pos.open_price,
+            optPrice=new_opt_pos.open_price,
+            strike=new_opt_pos.strike,
+            expDate=new_opt_pos.exp_date.strftime("%Y-%m-%d"),
             stat=stat, price_group=group)
     else:
-        new_put_cost = 0
-    return new_put_cost
+        new_opt_cost = 0
+    return new_opt_cost
+
+def buy_new_put(param, date, group, stat) -> float:
+    return open_new_option(param, date, group, stat, opt_type='p')
 
 def roll_over_option_pos(param, date, group, stat) -> None:
     stock_price = group['UnderlyingPrice'].iloc[0]
@@ -872,8 +887,8 @@ def main():
         "Stop is inclusive. Default 6,11,1")
 
     parser.add_argument(
-        '-c', '--covered-call-', default="0,",
-        help="Maximum delta of options to buy")
+        '-c', '--call-percent', type=int, default="0",
+        help="Maximum percent of call options to sell. 80 means sell 8 calls for 1000 shares")
 
     parser.add_argument(
         '-D', '--max-delta', default=0.5,
@@ -1002,7 +1017,8 @@ def main():
                     fixed_param = fixed_param,
                     put_otm_percent = put_otm,
                     call_otm_percent = call_otm,
-                    monthly_put_percent = monthly_put_percent)
+                    monthly_put_percent = monthly_put_percent,
+                    call_percent = args.call_percent)
                 params.append(param)
                 all_percent = set(monthly_put_percent)
                 if len(all_percent) == 1 and next(iter(all_percent)) == 0:
