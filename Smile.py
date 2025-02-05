@@ -353,20 +353,20 @@ class PositionsAndStats:
             print(f"{attr}: {round_float(self.__dict__[attr])}")
 
     def get_balance(self, price_group) -> (float, float):
-        nlv = self.total_shares() * price_group['UnderlyingPrice'].iloc[0];
+        nlv = self.total_shares() * price_group['UnderlyingPrice'].iloc[0]
         opt_nlv = 0
         for opt in self.opt_list:
-            put_info = \
+            opt_info = \
                 price_group[
-                    (price_group['PutCall'] == 'p') &
+                    (price_group['PutCall'] == opt.opt_type) &
                     (price_group['StrikePrice'] == opt.strike) &
                     (price_group['ExpirationDate'] == opt.exp_date)].\
-                    sort_values(by='StrikePrice', ascending=False)
-            if put_info.empty:
+                    sort_values(by='StrikePrice', ascending=(opt.opt_type == 'c'))
+            if opt_info.empty:
                 self.num_data_missing += 1
                 target_date = price_group['DataDate'].iloc[0]
                 date_str = target_date.strftime("%Y-%m-%d")
-                print(f'=== {date_str}: {opt.strike} Put expire on ' + \
+                print(f'=== {date_str}: {opt.strike} {opt.opt_type.upper()} expire on ' + \
                       f'{opt.exp_date} ' + \
                       f'missing, check prev day')
                 date_range_start = target_date - pd.Timedelta(days=5)
@@ -376,27 +376,27 @@ class PositionsAndStats:
                     (self.all_data['DataDate'] <= date_range_end)
                     ]
 
-                put_info = data_slice[
-                    (data_slice['PutCall'] == 'p') &
+                opt_info = data_slice[
+                    (data_slice['PutCall'] == opt.opt_type) &
                     (data_slice['ExpirationDate'] == opt.exp_date) &
                     (data_slice['StrikePrice'] == opt.strike)
                 ].sort_values(by='DataDate', ascending=False)
 
-                if put_info.empty:
-                    print(f'=== {date_str}: {opt.strike} Put expire on ' + \
+                if opt_info.empty:
+                    print(f'=== {date_str}: {opt.strike} {opt.opt_type.upper()} expire on ' + \
                           f'{opt.exp_date} ' + \
                           f'missing, check prev expire day')
                     new_exp_date = opt.exp_date - pd.Timedelta(days=1)
-                    put_info = data_slice[
-                        (data_slice['PutCall'] == 'p') &
+                    opt_info = data_slice[
+                        (data_slice['PutCall'] == opt.opt_type) &
                         (data_slice['ExpirationDate'] == new_exp_date) &
                         (data_slice['StrikePrice'] == opt.strike)
                     ]
 
-                assert(not put_info.empty)
+                assert(not opt_info.empty)
 
-            mid = (put_info['BidPrice'].iloc[0] + \
-                   put_info['AskPrice'].iloc[0]) / 2
+            mid = (opt_info['BidPrice'].iloc[0] + \
+                   opt_info['AskPrice'].iloc[0]) / 2
             opt_nlv += mid * opt.num_contracts * CONTRACT_SCALE
         nlv += opt_nlv
         return nlv, opt_nlv
@@ -407,10 +407,14 @@ class PositionsAndStats:
 
     def opt_delta_rate(self) -> float:
         delta = sum(opt.total_delta() for opt in self.opt_list)
+        if self.total_shares() == 0:
+            return 0
         return delta / self.total_shares()
 
     def max_opt_delta_rate(self) -> float:
         delta = sum(opt.total_max_delta() for opt in self.opt_list)
+        if self.total_shares() == 0:
+            return 0
         return delta / self.total_shares()
 
     def close_stock_positions(self, num_shares, close_price) -> None:
@@ -469,7 +473,7 @@ def third_fri_after_2_mon(year, month):
 
     return third_friday(year, month)
 
-def get_sell_price(param, put_info):
+def get_sell_price(param, put_info) -> (float, float):
     mid = (put_info['BidPrice'] + put_info['AskPrice']) / 2
     return max(mid * (1 - param.fixed_param.opt_slippage_percent), 0), mid
 
@@ -503,10 +507,7 @@ def close_old_option(param, date, group, stat, opt_type='p') -> float:
     stock_price = group['UnderlyingPrice'].iloc[0]
     date_str = date.strftime("%Y-%m-%d")
     for opt_pos in stat.opt_list:
-        if opt_pos.open_date == date:
-            just_opened_opt.append(opt_pos)
-            continue
-        if opt_pos.opt_type != opt_type:
+        if (opt_pos.open_date == date) or (opt_pos.opt_type != opt_type):
             just_opened_opt.append(opt_pos)
             continue
         opt_info = \
@@ -647,6 +648,9 @@ def open_new_option(param, date, group, stat, opt_type='p') -> float:
             new_opt_pos.num_contracts = \
                 -1 * int(max_call_contracts * (param.call_percent / 100))
             assert new_opt_pos.num_contracts <= 0 # sell calls, so must be negative
+
+        if new_opt_pos.num_contracts == 0:
+            return 0
 
         new_opt_cost = \
             (new_opt_pos.open_price * CONTRACT_SCALE +
@@ -844,10 +848,14 @@ def smile_strategy(df, param):
             stock_begin_price = stock_price
 
         cur_balance, opt_nlv = stat.get_balance(group)
+        if cur_balance < 0:
+            print(f'{date_str}: Strategy failed: balance < 0')
+            break
 
         failed = calc_drawdown(
             param, date_str, stat, group, cur_balance, stock_price)
         if failed:
+            cur_balance = 0
             break
 
         process_buy_hold(param, date_str, stat, stock_price)
@@ -868,6 +876,10 @@ def smile_strategy(df, param):
             last_year = date.year
 
         day_idx += 1
+
+    if cur_balance < 0:
+        print(f'{date_str}: Strategy failed: balance < 0')
+        cur_balance = 1 # avoid divide by 0 error
 
     # Performance Metrics Calculation
     total_years = (last_day - first_day).days / 365.25
