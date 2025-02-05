@@ -491,8 +491,10 @@ def buy_initial_stock(param, date, stock_price, stat) -> None:
     stat.total_commission += num_shares * \
         param.fixed_param.stock_comm_per_share
 
-def sell_old_put(param, date, group, stat) -> float:
-    old_put_value = 0
+def close_old_option(param, date, group, stat, opt_type='p') -> float:
+    assert opt_type in ['p', 'c']
+    is_put = (opt_type == 'p')
+    old_opt_value = 0
     capital_gain = 0
     just_opened_opt = []
     stock_price = group['UnderlyingPrice'].iloc[0]
@@ -501,35 +503,42 @@ def sell_old_put(param, date, group, stat) -> float:
         if opt_pos.open_date == date:
             just_opened_opt.append(opt_pos)
             continue
-        put_info = \
-            group[(group['PutCall'] == 'p') &
+        if opt_pos.opt_type != opt_type:
+            just_opened_opt.append(opt_pos)
+            continue
+        opt_info = \
+            group[(group['PutCall'] == opt_type) &
                   (group['StrikePrice'] == opt_pos.strike) &
                   (group['ExpirationDate'] == opt_pos.exp_date)]
-        assert(len(put_info) == 1)
-        put_sell_price = get_sell_price(param, put_info.iloc[0])
-        old_put_value += \
-            max((put_sell_price * CONTRACT_SCALE - \
+        assert(len(opt_info) == 1)
+        if is_put:
+            opt_close_price = get_sell_price(param, opt_info.iloc[0])
+        else:
+            opt_close_price = get_buy_price(param, opt_info.iloc[0])
+        old_opt_value += \
+            max((opt_close_price * CONTRACT_SCALE - \
                  param.fixed_param.opt_comm_per_contract) * \
                 opt_pos.num_contracts,
                 0)
-        cur_capital_gain = old_put_value - opt_pos.get_cost_basis()
+        cur_capital_gain = old_opt_value - opt_pos.get_cost_basis()
         capital_gain += cur_capital_gain
         stat.total_commission += \
             param.fixed_param.opt_comm_per_contract * opt_pos.num_contracts
+        action = 'sell' if is_put else 'buy'
         if Debug:
             nlv, opt_nlv = stat.get_balance(group)
-            print(f'{date_str}: sell {opt_pos.num_contracts:.0f}' + \
-                  f' at ${put_sell_price:.2f} {opt_pos}  ' + \
+            print(f'{date_str}: {action} {abs(opt_pos.num_contracts):.0f}' + \
+                  f' at ${opt_close_price:.2f} {opt_pos}  ' + \
                   f'gain={capital_gain} stock={stock_price} ' + \
                   f'NLV={nlv:.0f} ' + \
                   f'put_gain={stat.total_put_capital_gain + capital_gain}')
         add_monthly_csv_row(
-            param=param, date=date_str, action='sell',
-            entType='put',
+            param=param, date=date_str, action=action,
+            entType='put' if is_put else 'call',
             stkPrice=stock_price,
             contracts=opt_pos.num_contracts,
             optOpenPrice=opt_pos.open_price,
-            optPrice=put_sell_price,
+            optPrice=opt_close_price,
             strike=opt_pos.strike,
             expDate=opt_pos.exp_date.strftime("%Y-%m-%d"),
             optGain=cur_capital_gain,
@@ -540,7 +549,10 @@ def sell_old_put(param, date, group, stat) -> float:
     stat.total_put_capital_gain += capital_gain
     stat.annual_capital_gain += capital_gain
 
-    return old_put_value
+    return old_opt_value
+
+def sell_old_put(param, date, group, stat) -> float:
+    return close_old_option(param, date, group, stat, opt_type='p')
 
 def delta_iv(param, date, stock_price, pos):
     days = (pos.exp_date - date).days
