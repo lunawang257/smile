@@ -20,7 +20,7 @@ from optlib.gbs import (
     euro_implied_vol
 )
 
-Debug = True
+Debug = False
 
 CONTRACT_SCALE = 100
 
@@ -69,6 +69,8 @@ Monthly_fields = [
     'optGain',          # gain (<0 means loss) of this action
     'totalShares',
     'totalStkGain',
+    'totalPutGain',
+    'totalCallGain',
     'totalOptGain',
     'totalTax',
     'totalComm',
@@ -168,7 +170,10 @@ def add_monthly_csv_row(param=None, date='', action='buy', entType='stock',
     add_val(row, 'totalShares', stat.total_shares())
     add_val(row, 'totalStkGain',
             stat.total_capital_gain - stat.total_put_capital_gain)
-    add_val(row, 'totalOptGain', stat.total_put_capital_gain)
+    add_val(row, 'totalPutGain', stat.total_put_capital_gain)
+    add_val(row, 'totalCallGain', stat.total_call_capital_gain)
+    add_val(row, 'totalOptGain',
+            stat.total_put_capital_gain + stat.total_call_capital_gain)
     add_val(row, 'totalTax', stat.total_tax)
     add_val(row, 'totalComm', stat.total_commission)
     add_val(row, 'totalGain', stat.total_capital_gain)
@@ -342,6 +347,7 @@ class PositionsAndStats:
 
         self.total_capital_gain = 0
         self.total_put_capital_gain = 0
+        self.total_call_capital_gain = 0
         self.total_commission = 0
         self.num_data_missing = 0
         self.num_strike_too_low = 0
@@ -550,7 +556,10 @@ def close_old_option(param, date, group, stat, opt_type='p') -> float:
 
     stat.opt_list = just_opened_opt
     stat.total_capital_gain += capital_gain
-    stat.total_put_capital_gain += capital_gain
+    if is_put:
+        stat.total_put_capital_gain += capital_gain
+    else:
+        stat.total_call_capital_gain += capital_gain
     stat.annual_capital_gain += capital_gain
 
     return old_opt_value
@@ -898,10 +907,13 @@ def smile_strategy(df, param):
     return {
         'AllStats': stat,
         'EndNLV': cur_balance,
+        'TotalPutGain': stat.total_put_capital_gain,
+        'TotalCallGain': stat.total_call_capital_gain,
         'TotalYears': total_years,
-        'BuyHoldAnnualReturn': buy_hold_annual_return,
         'AnnualReturn': annual_return,
+        'BuyHoldAnnualReturn': buy_hold_annual_return,
         'MaxDrawdown': stat.max_drawdown,
+        'BuyHoldMaxDrawdown': stat.buy_hold_max_drawdown,
         'TotalCommission': stat.total_commission,
         'TotalTaxPaid': stat.total_tax,
         'NumDataMissing': stat.num_data_missing,
