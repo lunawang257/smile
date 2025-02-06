@@ -519,15 +519,15 @@ def close_old_option(param, date, group, stat, opt_type='p') -> float:
             opt_close_price, _ = get_sell_price(param, opt_info.iloc[0])
         else:
             opt_close_price, _ = get_buy_price(param, opt_info.iloc[0])
-        old_opt_value += \
-            max((opt_close_price * CONTRACT_SCALE - \
-                 param.fixed_param.opt_comm_per_contract) * \
-                opt_pos.num_contracts,
-                0)
-        cur_capital_gain = old_opt_value - opt_pos.get_cost_basis()
+        comm = param.fixed_param.opt_comm_per_contract
+        close_price_after_comm = max(0,
+            opt_close_price * CONTRACT_SCALE - comm)
+        old_opt_value += close_price_after_comm * \
+            opt_pos.num_contracts
+        cost_basis = opt_pos.get_cost_basis()
+        cur_capital_gain = old_opt_value - cost_basis
         capital_gain += cur_capital_gain
-        stat.total_commission += \
-            param.fixed_param.opt_comm_per_contract * opt_pos.num_contracts
+        stat.total_commission += comm * opt_pos.num_contracts
         action = 'sell' if is_put else 'buy'
         if Debug:
             nlv, opt_nlv = stat.get_balance(group)
@@ -703,11 +703,11 @@ def roll_over_option_pos(param, date, group, stat) -> None:
     new_call_cost = sell_new_call(param, date, group, stat)
 
     net_balance = old_put_value - new_put_cost + old_call_value - new_call_cost
-    if net_balance > 0: # put generated profit, buy more shares
+    if net_balance > 0: # options generated profit, buy more shares
         fill_price = stock_price + \
             (param.fixed_param.stock_slippage + \
              param.fixed_param.stock_comm_per_share)
-    else: # put costed money, sell some stock to make up
+    else: # options costed money, sell some stock to make up
         fill_price = stock_price - \
             (param.fixed_param.stock_slippage + \
              param.fixed_param.stock_comm_per_share)
@@ -731,7 +731,7 @@ def roll_over_option_pos(param, date, group, stat) -> None:
             entType='stock', stkShares=shares,
             stkOpenPrice=fill_price, stkPrice=fill_price, stat=stat,
             price_group=group)
-    else: # close existing stock position
+    elif shares < 0: # close existing stock position
         gain, avg_open_price = stat.close_stock_positions(-shares, fill_price)
         stat.total_commission += \
             param.fixed_param.stock_comm_per_share * abs(shares)
@@ -877,7 +877,7 @@ def smile_strategy(df, param):
 
         day_idx += 1
 
-    if cur_balance < 0:
+    if cur_balance <= 0:
         print(f'{date_str}: Strategy failed: balance < 0')
         cur_balance = 1 # avoid divide by 0 error
 
